@@ -1,0 +1,87 @@
+{
+    "cameras": [
+        {
+            "calibration": {
+                "cx": 624.2,
+                "cy": 400.3,
+                "dist": [
+                    0.053,
+                    -0.066,
+                    0.001,
+                    -0.001,
+                    -0.012,
+                    -0.002,
+                    0.0,
+                    -0.001
+                ],
+                "fx": 919.83,
+                "fy": 921.17
+            },
+            "name": "starboard",
+            "offset": {
+                "brightness": -12,
+                "exposure": 300,
+                "gain": 59,
+                "pitch": 10.0,
+                "roll": 0.0,
+                "x": 0.2309876,
+                "y": 0.3805428,
+                "yaw": 90.0,
+                "z": 0.2141982
+            },
+            "path": "/dev/v4l/by-path/platform-xhci-hcd.7.auto-usb-0:1:1.0-video-index0",
+            "tuning": {
+                "auto_exposure": true,
+                "brightness": 0,
+                "decimate": 2.0,
+                "exposure": 185,
+                "gain": 38,
+                "latency_ms": 0.0,
+                "margin": 50.0,
+                "threads": 4
+            }
+        },
+        {
+            "calibration": {
+                "cx": 624.2,
+                "cy": 400.3,
+                "dist": [
+                    0.053,
+                    -0.066,
+                    0.001,
+                    -0.001,
+                    -0.012,
+                    -0.002,
+                    0.0,
+                    -0.001
+                ],
+                "fx": 919.83,
+                "fy": 921.17
+            },
+            "name": "port",
+            "offset": {
+                "brightness": -12,
+                "exposure": 300,
+                "gain": 59,
+                "pitch": 10.0,
+                "roll": 0.0,
+                "x": 0.1294384,
+                "y": -0.3513328,
+                "yaw": -90.0,
+                "z": 0.3030728
+            },
+            "path": "/dev/v4l/by-path/platform-xhci-hcd.8.auto-usb-0:1:1.0-video-index0",
+            "tuning": {
+                "auto_exposure": true,
+                "brightness": 0,
+                "decimate": 2.0,
+                "exposure": 25,
+                "gain": 38,
+                "latency_ms": 0.0,
+                "margin": 50.0,
+                "threads": 4
+            }
+        }
+    ],
+    "team_number": 9015
+}
