@@ -8,6 +8,8 @@
 #include <atomic>
 #include <mutex>
 #include <algorithm>
+#include <memory>
+#include <stdexcept>
 
 // Third-party Libraries
 #include <nlohmann/json.hpp>
@@ -17,14 +19,11 @@
 #include <networktables/NetworkTableInstance.h>
 #include <networktables/DoubleArrayTopic.h>
 #include "httplib.h"
+#include "pose_math.hpp"
+#include "diagnostics.hpp"
 
 using json = nlohmann::json;
 
-#ifndef M_PI
-#define M_PI 3.14159265358979323846
-#endif
-
-const double TAG_SIZE = 0.1651; // 6.5 inches
 const std::string configPath = "/home/dietpi/Umbra/config.json";
 
 std::mutex frameMutex;
@@ -48,33 +47,6 @@ struct FieldTag {
 }; 
 std::map<int, FieldTag> fieldMap;
 
-// --- MATH HELPERS ---
-cv::Mat makeT(cv::Mat R, cv::Mat t) {
-    cv::Mat T = cv::Mat::eye(4, 4, CV_64F);
-    if (R.cols == 3 && R.rows == 3) R.copyTo(T(cv::Rect(0, 0, 3, 3)));
-    if (t.total() == 3) {
-        cv::Mat t_col = t.reshape(1, 3);
-        t_col.copyTo(T(cv::Rect(3, 0, 1, 3)));
-    }
-    return T;
-}
-
-cv::Mat quatToMatrix(double w, double x, double y, double z) {
-    cv::Mat R(3, 3, CV_64F);
-    R.at<double>(0,0) = 1-2*y*y-2*z*z; R.at<double>(0,1) = 2*x*y-2*z*w;     R.at<double>(0,2) = 2*x*z+2*y*w;
-    R.at<double>(1,0) = 2*x*y+2*z*w;     R.at<double>(1,1) = 1-2*x*x-2*z*z; R.at<double>(1,2) = 2*y*z-2*x*w;
-    R.at<double>(2,0) = 2*x*z-2*y*w;     R.at<double>(2,1) = 2*y*z+2*x*w;     R.at<double>(2,2) = 1-2*x*x-2*y*y;
-    return R;
-}
-
-cv::Mat eulerToRotation(double r_deg, double p_deg, double y_deg) {
-    double r = r_deg*M_PI/180.0, p = p_deg*M_PI/180.0, y = y_deg*M_PI/180.0;
-    cv::Mat Rx = (cv::Mat_<double>(3,3) << 1,0,0, 0,cos(r),-sin(r), 0,sin(r),cos(r));
-    cv::Mat Ry = (cv::Mat_<double>(3,3) << cos(p),0,sin(p), 0,1,0, -sin(p),0,cos(p));
-    cv::Mat Rz = (cv::Mat_<double>(3,3) << cos(y),-sin(y),0, sin(y),cos(y),0, 0,0,1);
-    return Rz * Ry * Rx; 
-}
-
 void loadField(std::string path) {
     std::ifstream f(path); if (!f.is_open()) return;
     json data = json::parse(f);
@@ -82,8 +54,8 @@ void loadField(std::string path) {
         int id = tag["ID"];
         cv::Mat t = (cv::Mat_<double>(3,1) << (double)tag["pose"]["translation"]["x"], (double)tag["pose"]["translation"]["y"], (double)tag["pose"]["translation"]["z"]);
         auto q = tag["pose"]["rotation"]["quaternion"];
-        cv::Mat R = quatToMatrix(q["W"], q["X"], q["Y"], q["Z"]);
-        fieldMap[id] = {id, makeT(R, t)};
+        cv::Mat R = umbra::pose::quatToMatrix(q["W"], q["X"], q["Y"], q["Z"]);
+        fieldMap[id] = {id, umbra::pose::makeT(R, t)};
     }
 }
 
@@ -253,6 +225,8 @@ void runWebServer(std::vector<CameraInstance*>& cameras) {
 
 // --- CAMERA WORKER ---
 void cameraWorker(CameraInstance* cam) {
+    using Metric = umbra::diagnostics::Metric;
+    umbra::diagnostics::Window diagnostics(cam->name);
     if (cam->auto_exposure) {
         system(("v4l2-ctl -d " + cam->path + " -c auto_exposure=3").c_str());
     } else {
@@ -267,104 +241,118 @@ void cameraWorker(CameraInstance* cam) {
     
     cv::TermCriteria subpixCriteria(cv::TermCriteria::EPS + cv::TermCriteria::MAX_ITER, 30, 0.01);
     cv::Mat frame, gray, subpix_gray, debugFrame;
-    double s = TAG_SIZE / 2.0;
-
-    // THE FIX: The exact working Tag Corners array that prevented the blue/red side switch
-    std::vector<cv::Point3d> tag_corners_nwu = {
-        {0, -s, -s}, // 0: BL 
-        {0,  s, -s}, // 1: BR 
-        {0,  s,  s}, // 2: TR 
-        {0, -s,  s}  // 3: TL 
-    };
-
     while (true) {
         std::string pipe = "v4l2src device=" + cam->path + " ! image/jpeg,width=1280,height=800,framerate=100/1 ! jpegdec ! videoconvert ! appsink max-buffers=1 drop=true";
         cv::VideoCapture cap(pipe, cv::CAP_GSTREAMER);
-        if(!cap.isOpened()) { std::this_thread::sleep_for(std::chrono::seconds(2)); continue; }
+        if(!cap.isOpened()) {
+            diagnostics.cameraUnavailable("open_failed");
+            std::this_thread::sleep_for(std::chrono::seconds(2));
+            continue;
+        }
         
         while (true) {
-            if (!cap.read(frame) || frame.empty()) break;
+            const auto frameStart = diagnostics.stamp();
+            try {
+                if (!cap.read(frame) || frame.empty()) {
+                    diagnostics.cameraUnavailable("read_failed");
+                    break;
+                }
+            } catch (const cv::Exception&) {
+                diagnostics.cameraUnavailable("read_failed");
+                break;
+            }
+            diagnostics.cameraRestored();
+            const auto retrievedAt = std::chrono::steady_clock::now();
+            diagnostics.add(Metric::CaptureRead, frameStart, retrievedAt);
+            diagnostics.readFrame(retrievedAt);
             int64_t local_time_us = nt::Now();
             auto time_offset = nt::NetworkTableInstance::GetDefault().GetServerTimeOffset();
             double ts = (local_time_us + time_offset.value_or(0)) / 1000000.0;
             
+            try {
+            const auto conversionStart = diagnostics.stamp();
             cv::cvtColor(frame, gray, cv::COLOR_BGR2GRAY);
+            diagnostics.add(Metric::Convert, conversionStart, diagnostics.stamp());
             image_u8_t img = { .width = gray.cols, .height = gray.rows, .stride = gray.cols, .buf = gray.data };
-            zarray_t *detections = apriltag_detector_detect(td, &img);
+            const auto detectionStart = diagnostics.stamp();
+            std::unique_ptr<zarray_t, decltype(&apriltag_detections_destroy)> detections(
+                apriltag_detector_detect(td, &img), &apriltag_detections_destroy);
+            if (!detections) throw std::runtime_error("AprilTag detector failed");
+            diagnostics.add(Metric::Detect, detectionStart, diagnostics.stamp());
             
+            const auto previewStart = diagnostics.stamp();
             if (clientIsWatching) {
                 frame.copyTo(debugFrame);
-                for (int i = 0; i < zarray_size(detections); i++) {
-                    apriltag_detection_t *det; zarray_get(detections, i, &det);
+                for (int i = 0; i < zarray_size(detections.get()); i++) {
+                    apriltag_detection_t *det; zarray_get(detections.get(), i, &det);
                     for (int j=0; j<4; j++) cv::line(debugFrame, cv::Point(det->p[j][0], det->p[j][1]), cv::Point(det->p[(j+1)%4][0], det->p[(j+1)%4][1]), cv::Scalar(0,255,0), 2);
                 }
                 std::lock_guard<std::mutex> lock(frameMutex); cameraFrames[cam->name] = debugFrame.clone();
+                diagnostics.add(Metric::Preview, previewStart, diagnostics.stamp());
             }
 
             // ANTI-JITTER: Light Gaussian Blur to smooth out sensor noise for subpix
+            const auto blurStart = diagnostics.stamp();
             cv::GaussianBlur(gray, subpix_gray, cv::Size(3, 3), 0.75);
+            diagnostics.add(Metric::Blur, blurStart, diagnostics.stamp());
 
             std::vector<cv::Point3d> objectPoints;
             std::vector<cv::Point2f> imagePoints;
             int tagsSeen = 0;
-            int lastAcceptedTagId = -1;
 
-            for (int i = 0; i < zarray_size(detections); i++) {
-                apriltag_detection_t *det; zarray_get(detections, i, &det);
+            for (int i = 0; i < zarray_size(detections.get()); i++) {
+                apriltag_detection_t *det; zarray_get(detections.get(), i, &det);
                 if (fieldMap.count(det->id) && det->decision_margin > 50) {
+                    const auto cornerStart = diagnostics.stamp();
                     std::vector<cv::Point2f> imgPts = {{(float)det->p[0][0],(float)det->p[0][1]},{(float)det->p[1][0],(float)det->p[1][1]},{(float)det->p[2][0],(float)det->p[2][1]},{(float)det->p[3][0],(float)det->p[3][1]}};
                     
                     if (cv::norm(imgPts[0] - imgPts[1]) > 25.0) {
                         try { cv::cornerSubPix(subpix_gray, imgPts, cv::Size(3, 3), cv::Size(-1, -1), subpixCriteria); } catch(...) {}
+                        diagnostics.add(Metric::CornerRefine, cornerStart, diagnostics.stamp());
                     }
                     
-                    std::vector<cv::Point2f> undistortedPts;
-                    cv::undistortPoints(imgPts, undistortedPts, cam->camMatrix, cam->distCoeffs, cv::noArray(), cam->camMatrix);
-
-                    cv::Mat T_field_tag = fieldMap[det->id].T_field_tag;
-                    for (const auto& localPt : tag_corners_nwu) {
-                        cv::Mat ptMat = (cv::Mat_<double>(4,1) << localPt.x, localPt.y, localPt.z, 1.0);
-                        cv::Mat fieldPtMat = T_field_tag * ptMat;
-                        objectPoints.push_back(cv::Point3d(fieldPtMat.at<double>(0,0), fieldPtMat.at<double>(1,0), fieldPtMat.at<double>(2,0)));
-                    }
-                    for (const auto& uPt : undistortedPts) imagePoints.push_back(uPt);
+                    const auto prepareStart = diagnostics.stamp();
+                    umbra::pose::appendTagPoints(fieldMap[det->id].T_field_tag,
+                                                 imgPts,
+                                                 objectPoints, imagePoints);
+                    diagnostics.add(Metric::TagPrepare, prepareStart, diagnostics.stamp());
                     
-                    lastAcceptedTagId = det->id;
                     tagsSeen++;
                 }
             }
 
             if (tagsSeen > 1) { 
-                cv::Mat rvec, tvec;
-                if (cv::solvePnP(objectPoints, imagePoints, cam->camMatrix, cam->distCoeffs, rvec, tvec, false, cv::SOLVEPNP_SQPNP)) {
-                    
-                    // ANTI-JITTER: Levenberg-Marquardt refinement
-                    cv::solvePnPRefineLM(objectPoints, imagePoints, cam->camMatrix, cam->distCoeffs, rvec, tvec);
-
-                    cv::Mat R_f_c; cv::Rodrigues(rvec, R_f_c);
-                    cv::Mat T_c_f_ocv = makeT(R_f_c, tvec).inv();
-
-                    // THE FIX: The exact working swizzle that kept you on the correct side
-                    cv::Mat M_nwu_to_ocv = (cv::Mat_<double>(4,4) << 0,-1,0,0,  0,0,-1,0,  1,0,0,0,  0,0,0,1);
-                    cv::Mat M_ocv_to_nwu = M_nwu_to_ocv.inv();
-
-                    cv::Mat T_cam_to_field_nwu = T_c_f_ocv * M_ocv_to_nwu;
-                    cv::Mat T_f_r = T_cam_to_field_nwu * cam->T_robot_camera.inv();
-
-                    double x = T_f_r.at<double>(0, 3);
-                    double y = T_f_r.at<double>(1, 3);
-                    double yaw = atan2(T_f_r.at<double>(1,0), T_f_r.at<double>(0,0));
-
-                    // --- THE ALIGNMENT FIX ---
-                    // Natively aligns your correct -90 yaw directly with the physical chassis arrow (+90 shift)
-                    yaw = yaw + (M_PI / 2.0);
-
-                    cam->pub.Set(std::vector<double>{ts, x, y, 0, 0, 0, yaw, (double)tagsSeen, cv::norm(tvec)});
+                umbra::pose::Result result{};
+                const auto poseStart = diagnostics.stamp();
+                const bool solved = umbra::pose::solveRobotPose(objectPoints, imagePoints, tagsSeen,
+                                                                 cam->camMatrix, cam->distCoeffs,
+                                                                 cam->T_robot_camera, result);
+                diagnostics.add(Metric::Pose, poseStart, diagnostics.stamp());
+                if (solved && std::chrono::steady_clock::now() - retrievedAt <=
+                                  std::chrono::milliseconds(500)) {
+                    const auto publicationStart = diagnostics.stamp();
+                    cam->pub.Set(std::vector<double>{ts, result.x, result.y, 0, 0, 0,
+                                                      result.yaw, (double)tagsSeen,
+                                                      result.distance});
+                    diagnostics.published(retrievedAt, publicationStart, diagnostics.stamp());
+                    diagnostics.pose(result.x, result.y, result.yaw);
+                } else {
+                    diagnostics.rejected(solved ? "old_frame" : "pose_failed");
                 }
             } else {
-                cam->pub.Set(std::vector<double>{ts, 0, 0, 0, 0, 0, 0, 0, 0});
+                diagnostics.rejected("too_few_tags");
             }
-            apriltag_detections_destroy(detections);
+            } catch (const std::exception& error) {
+                diagnostics.rejected("processing_error");
+                if (diagnostics.enabled()) {
+                    std::lock_guard<std::mutex> lock(umbra::diagnostics::outputMutex);
+                    std::cerr << "[umbra diagnostics] camera=" << cam->name
+                              << " processing_error=" << error.what() << '\n';
+                }
+            }
+            const auto frameDone = diagnostics.stamp();
+            diagnostics.add(Metric::FrameTotal, frameStart, frameDone);
+            diagnostics.frameDone(frameDone);
         }
         cap.release();
     }
@@ -385,7 +373,7 @@ int main() {
         for(int i=0; i < (int)d.size(); i++) cam->distCoeffs.at<double>(i) = d[i];
         
         auto off = c_json["offset"]; 
-        cam->T_robot_camera = makeT(eulerToRotation(off["roll"].get<double>(), off["pitch"].get<double>(), off["yaw"].get<double>()), 
+        cam->T_robot_camera = umbra::pose::makeT(umbra::pose::eulerToRotation(off["roll"].get<double>(), off["pitch"].get<double>(), off["yaw"].get<double>()),
                                   (cv::Mat_<double>(3,1) << off["x"].get<double>(), off["y"].get<double>(), off["z"].get<double>()));
         
         // --- SECURE BACKWARD-COMPATIBLE INITIALIZATION ---

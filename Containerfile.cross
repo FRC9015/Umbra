@@ -1,0 +1,13 @@
+FROM debian:trixie
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        cmake \
+        ninja-build \
+        gcc-aarch64-linux-gnu \
+        g++-aarch64-linux-gnu \
+        pkg-config \
+        file \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /work/Umbra

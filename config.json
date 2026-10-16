@@ -22,12 +22,12 @@
                 "brightness": -12,
                 "exposure": 300,
                 "gain": 59,
-                "pitch": 10.0,
+                "pitch": 15.0,
                 "roll": 0.0,
-                "x": 0.2309876,
-                "y": 0.3805428,
-                "yaw": 90.0,
-                "z": 0.2141982
+                "x": -0.2301748,
+                "y": -0.3818636,
+                "yaw": 270.0,
+                "z": 0.1988566
             },
             "path": "/dev/v4l/by-path/platform-xhci-hcd.7.auto-usb-0:1:1.0-video-index0",
             "tuning": {
@@ -63,12 +63,12 @@
                 "brightness": -12,
                 "exposure": 300,
                 "gain": 59,
-                "pitch": 10.0,
+                "pitch": 15.0,
                 "roll": 0.0,
-                "x": 0.1294384,
-                "y": -0.3513328,
-                "yaw": -90.0,
-                "z": 0.3030728
+                "x": -0.2301748,
+                "y": 0.3824478,
+                "yaw": 90.0,
+                "z": 0.2369566
             },
             "path": "/dev/v4l/by-path/platform-xhci-hcd.8.auto-usb-0:1:1.0-video-index0",
             "tuning": {
